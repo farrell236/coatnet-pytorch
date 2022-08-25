@@ -5,6 +5,10 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 
 
+def pair(t):
+    return t if isinstance(t, tuple) else (t, t)
+
+
 def conv_3x3_bn(inp, oup, image_size, downsample=False):
     stride = 1 if downsample == False else 2
     return nn.Sequential(
@@ -66,7 +70,7 @@ class MBConv(nn.Module):
 
         if self.downsample:
             self.pool = nn.MaxPool2d(3, 2, 1)
-            self.proj = nn.Conv2d(inp, oup, 1, 1, 0, bias=False)
+        self.proj = nn.Conv2d(inp, oup, 1, 1, 0, bias=False)
 
         if expansion == 1:
             self.conv = nn.Sequential(
@@ -103,7 +107,7 @@ class MBConv(nn.Module):
         if self.downsample:
             return self.proj(self.pool(x)) + self.conv(x)
         else:
-            return x + self.conv(x)
+            return self.proj(x) + self.conv(x)
 
 
 class Attention(nn.Module):
@@ -112,25 +116,25 @@ class Attention(nn.Module):
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == inp)
 
-        self.ih, self.iw = image_size
+        # self.ih, self.iw = image_size
 
         self.heads = heads
         self.scale = dim_head ** -0.5
 
-        # parameter table of relative position bias
-        self.relative_bias_table = nn.Parameter(
-            torch.zeros((2 * self.ih - 1) * (2 * self.iw - 1), heads))
-
-        coords = torch.meshgrid((torch.arange(self.ih), torch.arange(self.iw)))
-        coords = torch.flatten(torch.stack(coords), 1)
-        relative_coords = coords[:, :, None] - coords[:, None, :]
-
-        relative_coords[0] += self.ih - 1
-        relative_coords[1] += self.iw - 1
-        relative_coords[0] *= 2 * self.iw - 1
-        relative_coords = rearrange(relative_coords, 'c h w -> h w c')
-        relative_index = relative_coords.sum(-1).flatten().unsqueeze(1)
-        self.register_buffer("relative_index", relative_index)
+        # # parameter table of relative position bias
+        # self.relative_bias_table = nn.Parameter(
+        #     torch.zeros((2 * self.ih - 1) * (2 * self.iw - 1), heads))
+        #
+        # coords = torch.meshgrid((torch.arange(self.ih), torch.arange(self.iw)))
+        # coords = torch.flatten(torch.stack(coords), 1)
+        # relative_coords = coords[:, :, None] - coords[:, None, :]
+        #
+        # relative_coords[0] += self.ih - 1
+        # relative_coords[1] += self.iw - 1
+        # relative_coords[0] *= 2 * self.iw - 1
+        # relative_coords = rearrange(relative_coords, 'c h w -> h w c')
+        # relative_index = relative_coords.sum(-1).flatten().unsqueeze(1)
+        # self.register_buffer("relative_index", relative_index)
 
         self.attend = nn.Softmax(dim=-1)
         self.to_qkv = nn.Linear(inp, inner_dim * 3, bias=False)
@@ -147,12 +151,12 @@ class Attention(nn.Module):
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
-        # Use "gather" for more efficiency on GPUs
-        relative_bias = self.relative_bias_table.gather(
-            0, self.relative_index.repeat(1, self.heads))
-        relative_bias = rearrange(
-            relative_bias, '(h w) c -> 1 c h w', h=self.ih*self.iw, w=self.ih*self.iw)
-        dots = dots + relative_bias
+        # # Use "gather" for more efficiency on GPUs
+        # relative_bias = self.relative_bias_table.gather(
+        #     0, self.relative_index.repeat(1, self.heads))
+        # relative_bias = rearrange(
+        #     relative_bias, '(h w) c -> 1 c h w', h=self.ih*self.iw, w=self.ih*self.iw)
+        # dots = dots + relative_bias
 
         attn = self.attend(dots)
         out = torch.matmul(attn, v)
@@ -162,6 +166,89 @@ class Attention(nn.Module):
 
 
 class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, Attention(dim, dim, None, heads=heads, dim_head=dim_head, dropout=dropout), nn.LayerNorm),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout), nn.LayerNorm)
+            ]))
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        return x
+
+
+class ViTSeg(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim,
+                 pool='cls', channels=3, dim_head=64, dropout=0., emb_dropout=0.):
+        super().__init__()
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, \
+            'Image dimensions must be divisible by the patch size.'
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+                      p1=patch_height, p2=patch_width),
+            nn.Linear(patch_dim, dim),
+        )
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        # self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pool = pool
+        self.to_latent = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes),
+            nn.Sigmoid()
+        )
+
+        self.to_reconstructed = nn.Sequential(
+            nn.Linear(dim, patch_height * patch_width * num_classes),
+            Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+                      h=(image_height // patch_height),
+                      w=(image_width // patch_width),
+                      p1=patch_height,
+                      p2=patch_width,
+                      c=num_classes),
+        )
+
+
+
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, n, _ = x.shape
+
+        # cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
+        # x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :n]
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        x = self.to_reconstructed(x)
+
+        # x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
+        #
+        # x = self.to_latent(x)
+        # x = self.mlp_head(x)
+        return x
+
+
+class TransformerLayer(nn.Module):
     def __init__(self, inp, oup, image_size, heads=8, dim_head=32, downsample=False, dropout=0.):
         super().__init__()
         hidden_dim = int(inp * 4)
@@ -202,7 +289,7 @@ class CoAtNet(nn.Module):
     def __init__(self, image_size, in_channels, num_blocks, channels, num_classes=1000, block_types=['C', 'C', 'T', 'T']):
         super().__init__()
         ih, iw = image_size
-        block = {'C': MBConv, 'T': Transformer}
+        block = {'C': MBConv, 'T': TransformerLayer}
 
         self.s0 = self._make_layer(
             conv_3x3_bn, in_channels, channels[0], num_blocks[0], (ih // 2, iw // 2))
@@ -237,6 +324,46 @@ class CoAtNet(nn.Module):
             else:
                 layers.append(block(oup, oup, image_size))
         return nn.Sequential(*layers)
+
+
+class CoAtSegNet(nn.Module):
+    def __init__(self, image_size, in_channels, num_blocks, channels, num_classes=1000, block_types=['C', 'C', 'T', 'T']):
+        super().__init__()
+        block = {'C': MBConv, 'T': Transformer}
+
+        self.s0 = self._make_layer(
+            conv_3x3_bn, in_channels, channels[0], num_blocks[0], image_size)
+        self.s1 = self._make_layer(
+            block[block_types[0]], channels[0], channels[1], num_blocks[1], image_size)
+        self.s2 = self._make_layer(
+            block[block_types[1]], channels[1], channels[2], num_blocks[2], image_size)
+
+        self.vit = ViTSeg(image_size=image_size, patch_size=(8, 8), num_classes=num_classes,
+                       dim=512, depth=6, heads=8, mlp_dim=2048, pool='cls', channels=channels[2],
+                       dim_head=64, dropout=0., emb_dropout=0)
+
+    def forward(self, x):
+        x = self.s0(x)
+        x = self.s1(x)
+        x = self.s2(x)
+        x = self.vit(x)
+        return x
+
+    def _make_layer(self, block, inp, oup, depth, image_size, downsample=False):
+        layers = nn.ModuleList([])
+        for i in range(depth):
+            if i == 0:
+                layers.append(block(inp, oup, image_size, downsample=downsample))
+            else:
+                layers.append(block(oup, oup, image_size))
+        return nn.Sequential(*layers)
+
+
+def coatnet_seg():
+    num_blocks = [2, 2, 3, 5, 2]            # L
+    channels = [16, 24, 48, None, None]     # D
+    return CoAtSegNet((128, 128), 1, num_blocks, channels, num_classes=1)
+
 
 
 def coatnet_0():
@@ -274,6 +401,14 @@ def count_parameters(model):
 
 
 if __name__ == '__main__':
+
+    # Testing for Convolution-Attention Segmentation Network
+    img = torch.randn(1, 1, 128, 128).cuda()
+    net = coatnet_seg().cuda()
+    out = net(img)
+    print(out.shape, count_parameters(net))
+
+    # Testing for Convolution-Attention Networks
     img = torch.randn(1, 3, 224, 224)
 
     net = coatnet_0()

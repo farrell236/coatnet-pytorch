@@ -182,7 +182,8 @@ class Transformer(nn.Module):
 
 
 class ViTSeg3D(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim,
+                 pool='cls', channels=3, dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
         image_height, image_width, image_depth = pair(image_size)
         patch_height, patch_width, patch_depth = pair(patch_size)
@@ -284,7 +285,7 @@ class TransformerLayer(nn.Module):
         return x
 
 
-class CoAtNet(nn.Module):
+class CoAtNet3D(nn.Module):
     def __init__(self, image_size, in_channels, num_blocks, channels, num_classes=1000, block_types=['C', 'C', 'T', 'T']):
         super().__init__()
         ih, iw, id = image_size
@@ -325,7 +326,7 @@ class CoAtNet(nn.Module):
         return nn.Sequential(*layers)
 
 
-class CoAtSegNet(nn.Module):
+class CoAtSegNet3D(nn.Module):
     def __init__(self, image_size, in_channels, num_blocks, channels, num_classes=1000, block_types=['C', 'C', 'T', 'T']):
         super().__init__()
         block = {'C': MBConv, 'T': Transformer}
@@ -361,37 +362,37 @@ class CoAtSegNet(nn.Module):
 def coatnet_seg():
     num_blocks = [2, 2, 3, 5, 2]            # L
     channels = [16, 24, 48, None, None]     # D
-    return CoAtSegNet((128, 128, 24), 1, num_blocks, channels, num_classes=1)
+    return CoAtSegNet3D((128, 128, 24), 1, num_blocks, channels, num_classes=1)
 
 
 def coatnet_0():
     num_blocks = [2, 2, 3, 5, 2]            # L
     channels = [64, 96, 192, 384, 768]      # D
-    return CoAtNet((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
+    return CoAtNet3D((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
 def coatnet_1():
     num_blocks = [2, 2, 6, 14, 2]           # L
     channels = [64, 96, 192, 384, 768]      # D
-    return CoAtNet((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
+    return CoAtNet3D((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
 def coatnet_2():
     num_blocks = [2, 2, 6, 14, 2]           # L
     channels = [128, 128, 256, 512, 1026]   # D
-    return CoAtNet((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
+    return CoAtNet3D((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
 def coatnet_3():
     num_blocks = [2, 2, 6, 14, 2]           # L
     channels = [192, 192, 384, 768, 1536]   # D
-    return CoAtNet((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
+    return CoAtNet3D((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
 def coatnet_4():
     num_blocks = [2, 2, 12, 28, 2]          # L
     channels = [192, 192, 384, 768, 1536]   # D
-    return CoAtNet((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
+    return CoAtNet3D((224, 224, 224), 3, num_blocks, channels, num_classes=1000)
 
 
 def count_parameters(model):
